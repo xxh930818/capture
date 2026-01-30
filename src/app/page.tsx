@@ -1,8 +1,6 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import * as posedetection from "@tensorflow-models/pose-detection";
-import "@tensorflow/tfjs-backend-webgl";
 
 interface Face {
   x: number;
@@ -15,7 +13,6 @@ interface PoseKeypoint {
   x: number;
   y: number;
   score?: number;
-  name?: string;
 }
 
 export default function Home() {
@@ -32,13 +29,17 @@ export default function Home() {
   const streamRef = useRef<MediaStream | null>(null);
   const durationRef = useRef<NodeJS.Timeout | null>(null);
   const animationRef = useRef<number | null>(null);
-  const detectorRef = useRef<posedetection.PoseDetector | null>(null);
+  const detectorRef = useRef<any>(null);
   const canvasCtxRef = useRef<CanvasRenderingContext2D | null>(null);
 
-  // Load pose detection model
+  // Load pose detection model dynamically (client-side only)
   const loadPoseModel = async () => {
     try {
       setIsModelLoading(true);
+      // Dynamic import to avoid SSR issues
+      const posedetection = await import("@tensorflow-models/pose-detection");
+      await import("@tensorflow/tfjs-backend-webgl");
+
       const model = posedetection.SupportedModels.MoveNet;
       const detectorConfig = {
         modelType: posedetection.movenet.modelType.SINGLEPOSE_LIGHTNING,
@@ -51,35 +52,34 @@ export default function Home() {
     }
   };
 
-  // Simple face detection using color and motion
+  // Simple face detection using color
   const detectFaces = (ctx: CanvasRenderingContext2D, width: number, height: number): Face[] => {
     const imageData = ctx.getImageData(0, 0, width, height);
     const data = imageData.data;
     const faces: Face[] = [];
 
-    // Simple skin tone detection
-    for (let y = 0; y < height; y += 20) {
-      for (let x = 0; x < width; x += 20) {
+    // Sample grid for skin tone detection
+    const step = 24;
+    for (let y = 0; y < height; y += step) {
+      for (let x = 0; x < width; x += step) {
         const i = (y * width + x) * 4;
         const r = data[i];
         const g = data[i + 1];
         const b = data[i + 2];
 
-        // Skin tone detection (simplified)
+        // Skin tone detection
         const isSkin = r > 95 && g > 40 && b > 20 &&
                       r > g && r > b &&
-                      Math.abs(r - g) > 15 &&
-                      r - g < 100;
+                      r - g > 15 && r - g < 100;
 
         if (isSkin) {
-          // Check if we already have a face nearby
           const existing = faces.find(f =>
-            x > f.x - 50 && x < f.x + f.width + 50 &&
-            y > f.y - 50 && y < f.y + f.height + 50
+            x > f.x - 60 && x < f.x + f.width + 60 &&
+            y > f.y - 60 && y < f.y + f.height + 60
           );
 
           if (!existing && faces.length < 5) {
-            faces.push({ x: x - 40, y: y - 50, width: 80, height: 100 });
+            faces.push({ x: x - 45, y: y - 55, width: 90, height: 110 });
           }
         }
       }
@@ -88,46 +88,47 @@ export default function Home() {
     return faces;
   };
 
-  // Draw face boxes
+  // Draw face boxes with corner accents
   const drawFaces = (ctx: CanvasRenderingContext2D, faces: Face[]) => {
-    ctx.strokeStyle = "#00ff88";
-    ctx.lineWidth = 2;
+    const cornerSize = 12;
 
     faces.forEach(face => {
-      ctx.strokeRect(face.x, face.y, face.width, face.height);
-
-      // Draw corner accents
-      const cornerSize = 10;
+      // Draw corner accents in green
       ctx.strokeStyle = "#00ff88";
       ctx.lineWidth = 3;
 
-      // Top-left
+      // Top-left corner
       ctx.beginPath();
       ctx.moveTo(face.x, face.y + cornerSize);
       ctx.lineTo(face.x, face.y);
       ctx.lineTo(face.x + cornerSize, face.y);
       ctx.stroke();
 
-      // Top-right
+      // Top-right corner
       ctx.beginPath();
       ctx.moveTo(face.x + face.width - cornerSize, face.y);
       ctx.lineTo(face.x + face.width, face.y);
       ctx.lineTo(face.x + face.width, face.y + cornerSize);
       ctx.stroke();
 
-      // Bottom-left
+      // Bottom-left corner
       ctx.beginPath();
       ctx.moveTo(face.x, face.y + face.height - cornerSize);
       ctx.lineTo(face.x, face.y + face.height);
       ctx.lineTo(face.x + cornerSize, face.y + face.height);
       ctx.stroke();
 
-      // Bottom-right
+      // Bottom-right corner
       ctx.beginPath();
       ctx.moveTo(face.x + face.width - cornerSize, face.y + face.height);
       ctx.lineTo(face.x + face.width, face.y + face.height);
       ctx.lineTo(face.x + face.width, face.y + face.height - cornerSize);
       ctx.stroke();
+
+      // Draw face label
+      ctx.fillStyle = "#00ff88";
+      ctx.font = "11px monospace";
+      ctx.fillText("FACE", face.x, face.y - 8);
     });
 
     setFaceCount(faces.length);
@@ -136,14 +137,9 @@ export default function Home() {
   // Draw pose skeleton
   const drawPose = (ctx: CanvasRenderingContext2D, keypoints: PoseKeypoint[]) => {
     const connections = [
-      [0, 1], [0, 2], // head
-      [1, 3], [2, 4], // arms
-      [3, 5], [4, 6], // lower arms
-      [5, 6], // hands
-      [5, 7], [6, 8], // to hips
-      [7, 8], // hips
-      [7, 9], [8, 10], // legs
-      [9, 11], [10, 12], // lower legs
+      [0, 1], [0, 2], [1, 3], [2, 4],
+      [3, 5], [4, 6], [5, 6], [5, 7], [6, 8],
+      [7, 8], [7, 9], [8, 10], [9, 11], [10, 12],
     ];
 
     // Draw connections
@@ -165,16 +161,17 @@ export default function Home() {
     keypoints.forEach((kp, i) => {
       if (kp.score && kp.score > 0.3) {
         ctx.beginPath();
-        ctx.arc(kp.x, kp.y, 4, 0, 2 * Math.PI);
+        ctx.arc(kp.x, kp.y, 5, 0, 2 * Math.PI);
         ctx.fillStyle = i < 4 ? "#4ecdc4" : "#ff6b6b";
         ctx.fill();
         ctx.strokeStyle = "#fff";
-        ctx.lineWidth = 1;
+        ctx.lineWidth = 2;
         ctx.stroke();
       }
     });
 
-    setPoseDetected(keypoints.some(kp => kp.score && kp.score > 0.5));
+    const hasPose = keypoints.some(kp => kp.score && kp.score > 0.5);
+    setPoseDetected(hasPose);
   };
 
   // Detection loop
@@ -202,17 +199,17 @@ export default function Home() {
       try {
         const poses = await detectorRef.current.estimatePoses(video);
         if (poses.length > 0) {
-          const keypoints = poses[0].keypoints.map(kp => ({
+          const keypoints = poses[0].keypoints.map((kp: any) => ({
             x: kp.x,
             y: kp.y,
             score: kp.score,
           }));
           drawPose(ctx, keypoints);
-          const maxConf = Math.max(...keypoints.map(k => k.score || 0));
+          const maxConf = Math.max(...keypoints.map((k: any) => k.score || 0));
           setConfidence(Math.round(maxConf * 100));
         }
       } catch (e) {
-        // Silent retry on detection error
+        // Silent retry
       }
     }
 
@@ -379,7 +376,13 @@ export default function Home() {
                 <h2 className="text-xl font-semibold text-white mb-2">准备就绪</h2>
                 <p className="text-zinc-400 mb-2">点击下方按钮启动摄像头监控</p>
                 {isModelLoading && (
-                  <p className="text-yellow-400 text-sm mb-4">正在加载 AI 模型...</p>
+                  <p className="text-yellow-400 text-sm mb-4 flex items-center gap-2">
+                    <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    正在加载 AI 模型...
+                  </p>
                 )}
                 <button
                   onClick={startCamera}
