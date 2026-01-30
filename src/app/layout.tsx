@@ -5,7 +5,6 @@ export const metadata: Metadata = {
   title: "AI Capture Monitor",
   description: "AI-powered camera monitoring with real-time face and pose detection",
   manifest: "/manifest.json",
-  themeColor: "#000000",
   appleWebApp: {
     capable: true,
     statusBarStyle: "black-translucent",
@@ -28,7 +27,6 @@ export default function RootLayout({
     <html lang="zh-CN">
       <head>
         <link rel="icon" href="/icon.svg" type="image/svg+xml" />
-        <link rel="apple-touch-icon" href="/icon-192.png" />
       </head>
       <body className="bg-black text-white antialiased">
         {children}
