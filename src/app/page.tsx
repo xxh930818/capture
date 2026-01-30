@@ -1,16 +1,30 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+import { DetectionList, DetectionResult } from "@/components/detection-result";
+import { MonitoringStats } from "@/components/monitoring-stats";
+import { uploadScreenshot } from "@/lib/supabase";
+
+interface Detection {
+  type: 'face' | 'pose' | 'object';
+  confidence: number;
+  label: string;
+  timestamp: Date;
+}
 
 export default function Home() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [isMonitoring, setIsMonitoring] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-  const [detections, setDetections] = useState<string[]>([]);
-  const [modelLoaded, setModelLoaded] = useState(false);
+  const [detections, setDetections] = useState<Detection[]>([]);
+  const [duration, setDuration] = useState(0);
+  const [screenshotCount, setScreenshotCount] = useState(0);
   const streamRef = useRef<MediaStream | null>(null);
-  const animationRef = useRef<number | null>(null);
+  const durationRef = useRef<NodeJS.Timeout | null>(null);
+  const isUploadingRef = useRef(false);
 
   // 启动摄像头
   const startCamera = async () => {
@@ -30,6 +44,11 @@ export default function Home() {
       }
       setIsMonitoring(true);
       setIsLoading(false);
+
+      // 开始计时
+      durationRef.current = setInterval(() => {
+        setDuration(prev => prev + 1);
+      }, 1000);
     } catch (error) {
       console.error("摄像头访问失败:", error);
       alert("无法访问摄像头，请确保已授予权限");
@@ -43,21 +62,22 @@ export default function Home() {
       streamRef.current.getTracks().forEach(track => track.stop());
       streamRef.current = null;
     }
-    if (animationRef.current) {
-      cancelAnimationFrame(animationRef.current);
-      animationRef.current = null;
+    if (durationRef.current) {
+      clearInterval(durationRef.current);
+      durationRef.current = null;
     }
     setIsMonitoring(false);
     setDetections([]);
+    setDuration(0);
     if (canvasRef.current) {
       const ctx = canvasRef.current.getContext("2d");
       ctx?.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
     }
   };
 
-  // 截图
-  const captureSnapshot = () => {
-    if (!videoRef.current || !canvasRef.current) return;
+  // 截图并上传到 Supabase
+  const captureSnapshot = async () => {
+    if (!videoRef.current || !canvasRef.current || isUploadingRef.current) return;
 
     const video = videoRef.current;
     const canvas = canvasRef.current;
@@ -74,26 +94,67 @@ export default function Home() {
     ctx.font = "20px monospace";
     ctx.fillText(new Date().toLocaleString(), 10, 30);
 
-    // 下载图片
-    const link = document.createElement("a");
-    link.download = `capture-${Date.now()}.png`;
-    link.href = canvas.toDataURL();
-    link.click();
+    // 转换为 Blob
+    canvas.toBlob(async (blob) => {
+      if (!blob) return;
+
+      // 下载到本地
+      const link = document.createElement("a");
+      link.download = `capture-${Date.now()}.png`;
+      link.href = URL.createObjectURL(blob);
+      link.click();
+
+      // 上传到 Supabase（如果配置了）
+      isUploadingRef.current = true;
+      const fileName = `capture-${Date.now()}.png`;
+      const publicUrl = await uploadScreenshot(blob, fileName);
+
+      if (publicUrl) {
+        console.log("截图已上传到 Supabase:", publicUrl);
+        setScreenshotCount(prev => prev + 1);
+      }
+
+      isUploadingRef.current = false;
+    }, 'image/png');
   };
 
-  // 切换摄像头
-  const switchCamera = async () => {
-    stopCamera();
-    // 简单的切换逻辑，实际可能需要更复杂的处理
-    await startCamera();
-  };
+  // 模拟检测（用于演示）
+  useEffect(() => {
+    if (!isMonitoring) return;
+
+    const interval = setInterval(() => {
+      // 模拟随机检测结果
+      const types: Array<'face' | 'pose' | 'object'> = ['face', 'pose', 'object'];
+      const labels = {
+        face: ['检测到人脸', '多个人脸', '人脸识别成功'],
+        pose: ['站立姿态', '坐着', '挥手'],
+        object: ['检测到移动物体', '未知物体'],
+      };
+
+      const randomType = types[Math.floor(Math.random() * types.length)];
+      const randomLabel = labels[randomType][Math.floor(Math.random() * 3)];
+      const randomConfidence = 0.7 + Math.random() * 0.29;
+
+      const newDetection: Detection = {
+        type: randomType,
+        confidence: randomConfidence,
+        label: randomLabel,
+        timestamp: new Date(),
+      };
+
+      setDetections(prev => [newDetection, ...prev].slice(0, 10));
+    }, 3000);
+
+    return () => clearInterval(interval);
+  }, [isMonitoring]);
 
   useEffect(() => {
-    // 组件卸载时清理
     return () => {
       stopCamera();
     };
   }, []);
+
+  const alertCount = detections.filter(d => d.confidence > 0.9).length;
 
   return (
     <div className="min-h-screen bg-black flex flex-col">
@@ -102,24 +163,25 @@ export default function Home() {
         <div className="max-w-7xl mx-auto flex items-center justify-between">
           <div>
             <h1 className="text-xl font-bold text-white flex items-center gap-2">
-              <div className="w-3 h-3 bg-green-500 rounded-full animate-pulse"></div>
+              <div className={`w-3 h-3 rounded-full ${isMonitoring ? 'bg-red-500 animate-pulse' : 'bg-zinc-600'}`}></div>
               AI Capture Monitor
             </h1>
             <p className="text-xs text-zinc-400 mt-1">实时 AI 摄像监控</p>
           </div>
-          {modelLoaded && (
-            <span className="text-xs text-green-400 bg-green-400/10 px-2 py-1 rounded">
-              AI 模型已加载
-            </span>
+          {isMonitoring && (
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-zinc-400">{new Date().toLocaleTimeString()}</span>
+              <span className="text-xs px-2 py-1 bg-red-500/20 text-red-400 rounded-full">REC</span>
+            </div>
           )}
         </div>
       </header>
 
       {/* 主内容 */}
-      <main className="flex-1 flex flex-col items-center justify-center p-4">
-        <div className="w-full max-w-4xl">
+      <main className="flex-1 flex flex-col items-center justify-center p-4 gap-4">
+        <div className="w-full max-w-4xl space-y-4">
           {/* 视频容器 */}
-          <div className="relative bg-zinc-900 rounded-2xl overflow-hidden shadow-2xl">
+          <Card className="bg-zinc-900 border-0 overflow-hidden">
             {!isMonitoring ? (
               <div className="aspect-video flex flex-col items-center justify-center text-center p-8">
                 <div className="w-24 h-24 mb-6 rounded-full bg-zinc-800 flex items-center justify-center">
@@ -129,13 +191,9 @@ export default function Home() {
                 </div>
                 <h2 className="text-xl font-semibold text-white mb-2">准备就绪</h2>
                 <p className="text-zinc-400 mb-6">点击下方按钮启动摄像头监控</p>
-                <button
-                  onClick={startCamera}
-                  disabled={isLoading}
-                  className="px-8 py-3 bg-green-600 hover:bg-green-700 disabled:bg-zinc-700 text-white font-semibold rounded-xl transition-colors"
-                >
-                  {isLoading ? "启动中..." : "启动监控"}
-                </button>
+                <Button onClick={startCamera} isLoading={isLoading} size="lg">
+                  启动监控
+                </Button>
               </div>
             ) : (
               <div className="relative aspect-video">
@@ -148,72 +206,60 @@ export default function Home() {
                 />
                 <canvas
                   ref={canvasRef}
-                  className="absolute inset-0 w-full h-full"
+                  className="absolute inset-0 w-full h-full pointer-events-none"
                 />
 
                 {/* 检测信息覆盖层 */}
                 {detections.length > 0 && (
-                  <div className="absolute top-4 left-4 right-4 space-y-2">
-                    {detections.map((detection, i) => (
-                      <div
-                        key={i}
-                        className="bg-black/70 backdrop-blur-sm text-green-400 text-sm px-3 py-2 rounded-lg font-mono"
-                      >
-                        {detection}
-                      </div>
+                  <div className="absolute top-4 left-4 space-y-2 max-w-xs">
+                    {detections.slice(0, 3).map((detection, i) => (
+                      <DetectionResult key={`${i}-${detection.timestamp.getTime()}`} {...detection} />
                     ))}
                   </div>
                 )}
-
-                {/* 状态指示器 */}
-                <div className="absolute top-4 right-4 flex flex-col items-end gap-2">
-                  <div className="flex items-center gap-2 bg-black/70 backdrop-blur-sm px-3 py-2 rounded-full">
-                    <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
-                    <span className="text-white text-sm font-medium">REC</span>
-                  </div>
-                  <div className="text-white text-xs font-mono bg-black/70 backdrop-blur-sm px-2 py-1 rounded">
-                    {new Date().toLocaleTimeString()}
-                  </div>
-                </div>
               </div>
             )}
-          </div>
+          </Card>
+
+          {/* 统计信息 */}
+          {isMonitoring && (
+            <MonitoringStats
+              duration={duration}
+              detections={detections.length}
+              screenshots={screenshotCount}
+              alerts={alertCount}
+            />
+          )}
 
           {/* 控制栏 */}
           {isMonitoring && (
-            <div className="mt-4 flex items-center justify-center gap-4">
-              <button
-                onClick={captureSnapshot}
-                className="flex flex-col items-center gap-1 p-4 bg-zinc-900 hover:bg-zinc-800 rounded-xl transition-colors"
-              >
-                <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <div className="flex items-center justify-center gap-4">
+              <Button variant="secondary" onClick={captureSnapshot} disabled={isUploadingRef.current}>
+                <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
                 </svg>
-                <span className="text-xs text-zinc-400">截图</span>
-              </button>
+                {isUploadingRef.current ? '上传中...' : '截图'}
+              </Button>
 
-              <button
-                onClick={switchCamera}
-                className="flex flex-col items-center gap-1 p-4 bg-zinc-900 hover:bg-zinc-800 rounded-xl transition-colors"
-              >
-                <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                </svg>
-                <span className="text-xs text-zinc-400">切换</span>
-              </button>
-
-              <button
-                onClick={stopCamera}
-                className="flex flex-col items-center gap-1 p-4 bg-red-600 hover:bg-red-700 rounded-xl transition-colors"
-              >
-                <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <Button variant="secondary" onClick={stopCamera}>
+                <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 10a1 1 0 011-1h4a1 1 0 011 1v4a1 1 0 01-1 1h-4a1 1 0 01-1-1v-4z" />
                 </svg>
-                <span className="text-xs text-white">停止</span>
-              </button>
+                停止
+              </Button>
             </div>
+          )}
+
+          {/* 检测历史 */}
+          {isMonitoring && detections.length > 0 && (
+            <Card>
+              <CardContent className="p-4">
+                <h3 className="text-sm font-semibold text-zinc-400 mb-3">检测历史</h3>
+                <DetectionList detections={detections} maxItems={5} />
+              </CardContent>
+            </Card>
           )}
         </div>
       </main>
@@ -231,8 +277,8 @@ export default function Home() {
               <div className="text-xs text-zinc-500 mt-1">动作捕捉</div>
             </div>
             <div className="p-3 bg-zinc-800/50 rounded-xl">
-              <div className="text-purple-400 font-semibold">截图保存</div>
-              <div className="text-xs text-zinc-500 mt-1">本地存储</div>
+              <div className="text-purple-400 font-semibold">云端存储</div>
+              <div className="text-xs text-zinc-500 mt-1">Supabase</div>
             </div>
             <div className="p-3 bg-zinc-800/50 rounded-xl">
               <div className="text-orange-400 font-semibold">PWA</div>
