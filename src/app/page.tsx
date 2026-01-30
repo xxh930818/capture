@@ -9,10 +9,10 @@ interface Face {
   height: number;
 }
 
-interface PoseKeypoint {
+interface MotionArea {
   x: number;
   y: number;
-  score?: number;
+  intensity: number;
 }
 
 export default function Home() {
@@ -20,162 +20,222 @@ export default function Home() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [isMonitoring, setIsMonitoring] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
-  const [isModelLoading, setIsModelLoading] = useState(false);
   const [duration, setDuration] = useState(0);
   const [faceCount, setFaceCount] = useState(0);
-  const [poseDetected, setPoseDetected] = useState(false);
-  const [confidence, setConfidence] = useState(0);
+  const [motionLevel, setMotionLevel] = useState(0);
+  const [snapshots, setSnapshots] = useState<number>(0);
 
   const streamRef = useRef<MediaStream | null>(null);
   const durationRef = useRef<NodeJS.Timeout | null>(null);
   const animationRef = useRef<number | null>(null);
-  const detectorRef = useRef<any>(null);
   const canvasCtxRef = useRef<CanvasRenderingContext2D | null>(null);
+  const previousFrameRef = useRef<ImageData | null>(null);
 
-  // Load pose detection model dynamically (client-side only)
-  const loadPoseModel = async () => {
-    try {
-      setIsModelLoading(true);
-      // Dynamic import to avoid SSR issues
-      const posedetection = await import("@tensorflow-models/pose-detection");
-      await import("@tensorflow/tfjs-backend-webgl");
-
-      const model = posedetection.SupportedModels.MoveNet;
-      const detectorConfig = {
-        modelType: posedetection.movenet.modelType.SINGLEPOSE_LIGHTNING,
-      };
-      detectorRef.current = await posedetection.createDetector(model, detectorConfig);
-      setIsModelLoading(false);
-    } catch (error) {
-      console.error("模型加载失败:", error);
-      setIsModelLoading(false);
-    }
-  };
-
-  // Simple face detection using color
+  // Advanced face detection using skin tone and clustering
   const detectFaces = (ctx: CanvasRenderingContext2D, width: number, height: number): Face[] => {
     const imageData = ctx.getImageData(0, 0, width, height);
     const data = imageData.data;
-    const faces: Face[] = [];
+    const skinPixels: { x: number; y: number }[] = [];
 
-    // Sample grid for skin tone detection
-    const step = 24;
-    for (let y = 0; y < height; y += step) {
-      for (let x = 0; x < width; x += step) {
+    // Skin tone detection with multiple ranges
+    for (let y = 0; y < height; y += 8) {
+      for (let x = 0; x < width; x += 8) {
         const i = (y * width + x) * 4;
         const r = data[i];
         const g = data[i + 1];
         const b = data[i + 2];
 
-        // Skin tone detection
-        const isSkin = r > 95 && g > 40 && b > 20 &&
-                      r > g && r > b &&
-                      r - g > 15 && r - g < 100;
+        // Multiple skin tone ranges
+        const isSkin =
+          // Light skin
+          (r > 200 && g > 170 && b > 150 && r > g && r > b) ||
+          // Medium skin
+          (r > 150 && g > 100 && b > 80 && r > g * 1.2 && r - g > 30) ||
+          // Darker skin
+          (r > 100 && g > 70 && b > 60 && r > g * 1.1 && r - g > 20);
 
         if (isSkin) {
-          const existing = faces.find(f =>
-            x > f.x - 60 && x < f.x + f.width + 60 &&
-            y > f.y - 60 && y < f.y + f.height + 60
-          );
-
-          if (!existing && faces.length < 5) {
-            faces.push({ x: x - 45, y: y - 55, width: 90, height: 110 });
-          }
+          skinPixels.push({ x, y });
         }
       }
     }
 
-    return faces;
+    // Cluster skin pixels to find faces
+    const faces: Face[] = [];
+    const visited = new Set<string>();
+
+    skinPixels.forEach((pixel) => {
+      const key = `${pixel.x},${pixel.y}`;
+      if (visited.has(key)) return;
+
+      // Find nearby skin pixels
+      const cluster: { x: number; y: number }[] = [];
+      const queue = [pixel];
+
+      while (queue.length > 0 && cluster.length < 200) {
+        const p = queue.shift()!;
+        const pKey = `${p.x},${p.y}`;
+        if (visited.has(pKey)) continue;
+
+        visited.add(pKey);
+        cluster.push(p);
+
+        // Find neighbors
+        skinPixels.forEach((sp) => {
+          const dist = Math.sqrt((p.x - sp.x) ** 2 + (p.y - sp.y) ** 2);
+          if (dist < 80) {
+            const spKey = `${sp.x},${sp.y}`;
+            if (!visited.has(spKey)) {
+              queue.push(sp);
+            }
+          }
+        });
+      }
+
+      // If cluster is large enough, it's a face
+      if (cluster.length > 30) {
+        const minX = Math.min(...cluster.map((p) => p.x));
+        const maxX = Math.max(...cluster.map((p) => p.x));
+        const minY = Math.min(...cluster.map((p) => p.y));
+        const maxY = Math.max(...cluster.map((p) => p.y));
+
+        const w = maxX - minX;
+        const h = maxY - minY;
+
+        // Check aspect ratio for face
+        if (w > 40 && h > 50 && h / w > 1 && h / w < 2.5) {
+          // Check if this overlaps with existing face
+          const overlaps = faces.some((f) =>
+            minX < f.x + f.width + 30 &&
+            maxX + w > f.x - 30 &&
+            minY < f.y + f.height + 30 &&
+            maxY + h > f.y - 30
+          );
+
+          if (!overlaps) {
+            faces.push({ x: minX - 20, y: minY - 30, width: w + 40, height: h + 60 });
+          }
+        }
+      }
+    });
+
+    return faces.slice(0, 5);
   };
 
-  // Draw face boxes with corner accents
-  const drawFaces = (ctx: CanvasRenderingContext2D, faces: Face[]) => {
-    const cornerSize = 12;
+  // Motion detection
+  const detectMotion = (ctx: CanvasRenderingContext2D, width: number, height: number): number => {
+    const currentFrame = ctx.getImageData(0, 0, Math.min(width, 320), Math.min(height, 180));
+    const prevFrame = previousFrameRef.current;
 
-    faces.forEach(face => {
-      // Draw corner accents in green
-      ctx.strokeStyle = "#00ff88";
+    if (!prevFrame) {
+      previousFrameRef.current = currentFrame;
+      return 0;
+    }
+
+    const current = currentFrame.data;
+    const previous = prevFrame.data;
+    let motionPixels = 0;
+
+    for (let i = 0; i < current.length; i += 16) { // Sample every 4th pixel
+      const diff = Math.abs(current[i] - previous[i]) +
+                   Math.abs(current[i + 1] - previous[i + 1]) +
+                   Math.abs(current[i + 2] - previous[i + 2]);
+
+      if (diff > 50) {
+        motionPixels++;
+      }
+    }
+
+    previousFrameRef.current = currentFrame;
+    return Math.min(100, Math.round((motionPixels / (current.length / 16)) * 400));
+  };
+
+  // Draw face boxes with corner accents and details
+  const drawFaces = (ctx: CanvasRenderingContext2D, faces: Face[]) => {
+    const cornerSize = 14;
+    const tickLength = 8;
+
+    faces.forEach((face, index) => {
+      const colors = ["#00ff88", "#00d4ff", "#ff6b6b", "#ffd93d", "#a855f7"];
+      const color = colors[index % colors.length];
+
+      ctx.strokeStyle = color;
       ctx.lineWidth = 3;
 
-      // Top-left corner
+      // Draw corner brackets
+      // Top-left
       ctx.beginPath();
-      ctx.moveTo(face.x, face.y + cornerSize);
+      ctx.moveTo(face.x + tickLength, face.y);
       ctx.lineTo(face.x, face.y);
-      ctx.lineTo(face.x + cornerSize, face.y);
+      ctx.lineTo(face.x, face.y + tickLength + cornerSize);
       ctx.stroke();
 
-      // Top-right corner
+      // Top-right
       ctx.beginPath();
-      ctx.moveTo(face.x + face.width - cornerSize, face.y);
+      ctx.moveTo(face.x + face.width - tickLength, face.y);
       ctx.lineTo(face.x + face.width, face.y);
-      ctx.lineTo(face.x + face.width, face.y + cornerSize);
+      ctx.lineTo(face.x + face.width, face.y + tickLength + cornerSize);
       ctx.stroke();
 
-      // Bottom-left corner
+      // Bottom-left
       ctx.beginPath();
-      ctx.moveTo(face.x, face.y + face.height - cornerSize);
+      ctx.moveTo(face.x, face.y + face.height - tickLength - cornerSize);
       ctx.lineTo(face.x, face.y + face.height);
-      ctx.lineTo(face.x + cornerSize, face.y + face.height);
+      ctx.lineTo(face.x + tickLength, face.y + face.height);
       ctx.stroke();
 
-      // Bottom-right corner
+      // Bottom-right
       ctx.beginPath();
-      ctx.moveTo(face.x + face.width - cornerSize, face.y + face.height);
+      ctx.moveTo(face.x + face.width - tickLength, face.y + face.height);
       ctx.lineTo(face.x + face.width, face.y + face.height);
-      ctx.lineTo(face.x + face.width, face.y + face.height - cornerSize);
+      ctx.lineTo(face.x + face.width, face.y + face.height - tickLength - cornerSize);
       ctx.stroke();
 
-      // Draw face label
-      ctx.fillStyle = "#00ff88";
-      ctx.font = "11px monospace";
-      ctx.fillText("FACE", face.x, face.y - 8);
+      // Draw face label background
+      ctx.fillStyle = color;
+      ctx.fillRect(face.x, face.y - 20, 60, 18);
+
+      // Draw face label text
+      ctx.fillStyle = "#000";
+      ctx.font = "bold 11px monospace";
+      ctx.fillText(`FACE ${index + 1}`, face.x + 5, face.y - 6);
     });
 
     setFaceCount(faces.length);
   };
 
-  // Draw pose skeleton
-  const drawPose = (ctx: CanvasRenderingContext2D, keypoints: PoseKeypoint[]) => {
-    const connections = [
-      [0, 1], [0, 2], [1, 3], [2, 4],
-      [3, 5], [4, 6], [5, 6], [5, 7], [6, 8],
-      [7, 8], [7, 9], [8, 10], [9, 11], [10, 12],
-    ];
+  // Draw motion indicators
+  const drawMotion = (ctx: CanvasRenderingContext2D, motion: number) => {
+    if (motion < 10) return;
 
-    // Draw connections
-    ctx.strokeStyle = "#ff6b6b";
-    ctx.lineWidth = 2;
+    const width = ctx.canvas.width;
+    const height = ctx.canvas.height;
 
-    connections.forEach(([i, j]) => {
-      const kp1 = keypoints[i];
-      const kp2 = keypoints[j];
-      if (kp1 && kp2 && kp1.score && kp2.score && kp1.score > 0.3 && kp2.score > 0.3) {
-        ctx.beginPath();
-        ctx.moveTo(kp1.x, kp1.y);
-        ctx.lineTo(kp2.x, kp2.y);
-        ctx.stroke();
-      }
-    });
+    // Draw motion indicator bars on the right side
+    const barCount = 10;
+    const barHeight = 4;
+    const barSpacing = 8;
+    const startX = width - 20;
+    const startY = 20;
 
-    // Draw keypoints
-    keypoints.forEach((kp, i) => {
-      if (kp.score && kp.score > 0.3) {
-        ctx.beginPath();
-        ctx.arc(kp.x, kp.y, 5, 0, 2 * Math.PI);
-        ctx.fillStyle = i < 4 ? "#4ecdc4" : "#ff6b6b";
-        ctx.fill();
-        ctx.strokeStyle = "#fff";
-        ctx.lineWidth = 2;
-        ctx.stroke();
-      }
-    });
+    for (let i = 0; i < barCount; i++) {
+      const threshold = (i + 1) * 10;
+      const isActive = motion >= threshold;
 
-    const hasPose = keypoints.some(kp => kp.score && kp.score > 0.5);
-    setPoseDetected(hasPose);
+      ctx.fillStyle = isActive ? "#ff6b6b" : "#333";
+      ctx.fillRect(startX, startY + i * (barHeight + barSpacing), 8, barHeight);
+    }
+
+    // Draw motion percentage
+    ctx.fillStyle = "#ff6b6b";
+    ctx.font = "bold 12px monospace";
+    ctx.textAlign = "right";
+    ctx.fillText(`MOTION ${motion}%`, width - 10, height - 10);
+    ctx.textAlign = "left";
   };
 
   // Detection loop
-  const detectFrame = async () => {
+  const detectFrame = () => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
     if (!video || !canvas || !isMonitoring) return;
@@ -190,44 +250,33 @@ export default function Home() {
     // Clear canvas
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // Detect faces
+    // Detect and draw faces
     const faces = detectFaces(ctx, canvas.width, canvas.height);
     drawFaces(ctx, faces);
 
-    // Detect pose
-    if (detectorRef.current && video.readyState >= 2) {
-      try {
-        const poses = await detectorRef.current.estimatePoses(video);
-        if (poses.length > 0) {
-          const keypoints = poses[0].keypoints.map((kp: any) => ({
-            x: kp.x,
-            y: kp.y,
-            score: kp.score,
-          }));
-          drawPose(ctx, keypoints);
-          const maxConf = Math.max(...keypoints.map((k: any) => k.score || 0));
-          setConfidence(Math.round(maxConf * 100));
-        }
-      } catch (e) {
-        // Silent retry
-      }
-    }
+    // Detect and draw motion
+    const motion = detectMotion(ctx, canvas.width, canvas.height);
+    setMotionLevel(motion);
+    drawMotion(ctx, motion);
 
     // Draw timestamp
     ctx.fillStyle = "#00ff88";
-    ctx.font = "14px monospace";
-    ctx.fillText(new Date().toLocaleTimeString(), 10, 25);
+    ctx.font = "bold 14px monospace";
+    const timeStr = new Date().toLocaleTimeString();
+    ctx.fillText(timeStr, 10, 25);
 
-    // Draw status indicators
-    if (faceCount > 0) {
-      ctx.fillStyle = "#00ff88";
-      ctx.font = "12px monospace";
-      ctx.fillText(`FACES: ${faceCount}`, 10, canvas.height - 30);
-    }
-    if (poseDetected) {
-      ctx.fillStyle = "#ff6b6b";
-      ctx.fillText(`POSE: ${confidence}%`, 10, canvas.height - 15);
-    }
+    // Draw date
+    ctx.font = "11px monospace";
+    ctx.fillStyle = "#888";
+    ctx.fillText(new Date().toLocaleDateString(), 10, 42);
+
+    // Draw stats overlay
+    ctx.fillStyle = "#00ff88";
+    ctx.font = "11px monospace";
+    ctx.fillText(`FACES: ${faceCount}`, 10, canvas.height - 35);
+
+    ctx.fillStyle = motion > 20 ? "#ff6b6b" : "#888";
+    ctx.fillText(`MOTION: ${motion}%`, 10, canvas.height - 20);
 
     animationRef.current = requestAnimationFrame(detectFrame);
   };
@@ -253,10 +302,10 @@ export default function Home() {
       // Start detection loop
       setTimeout(() => {
         detectFrame();
-      }, 500);
+      }, 300);
 
       durationRef.current = setInterval(() => {
-        setDuration(prev => prev + 1);
+        setDuration((prev) => prev + 1);
       }, 1000);
     } catch (error) {
       console.error("摄像头访问失败:", error);
@@ -267,7 +316,7 @@ export default function Home() {
 
   const stopCamera = () => {
     if (streamRef.current) {
-      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
     }
     if (durationRef.current) {
@@ -281,8 +330,8 @@ export default function Home() {
     setIsMonitoring(false);
     setDuration(0);
     setFaceCount(0);
-    setPoseDetected(false);
-    setConfidence(0);
+    setMotionLevel(0);
+    previousFrameRef.current = null;
 
     // Clear canvas
     if (canvasRef.current) {
@@ -315,17 +364,22 @@ export default function Home() {
 
     // Add timestamp
     ctx.fillStyle = "#00ff88";
-    ctx.font = "20px monospace";
+    ctx.font = "bold 20px monospace";
     ctx.fillText(new Date().toLocaleString(), 10, 30);
+
+    // Add stats
+    ctx.font = "16px monospace";
+    ctx.fillText(`Faces: ${faceCount} | Motion: ${motionLevel}%`, 10, 55);
 
     const link = document.createElement("a");
     link.download = `capture-${Date.now()}.png`;
     link.href = tempCanvas.toDataURL();
     link.click();
+
+    setSnapshots((s) => s + 1);
   };
 
   useEffect(() => {
-    loadPoseModel();
     return () => {
       stopCamera();
     };
@@ -337,7 +391,7 @@ export default function Home() {
         <div className="max-w-7xl mx-auto flex items-center justify-between">
           <div>
             <h1 className="text-xl font-bold text-white flex items-center gap-2">
-              <div className={`w-3 h-3 rounded-full ${isMonitoring ? 'bg-red-500 animate-pulse' : 'bg-zinc-600'}`}></div>
+              <div className={`w-3 h-3 rounded-full ${isMonitoring ? "bg-red-500 animate-pulse" : "bg-zinc-600"}`}></div>
               AI Capture Monitor
             </h1>
             <p className="text-xs text-zinc-400 mt-1">实时 AI 摄像监控</p>
@@ -347,14 +401,14 @@ export default function Home() {
               <span className="text-xs text-zinc-400">{new Date().toLocaleTimeString()}</span>
               {faceCount > 0 && (
                 <span className="text-xs px-2 py-1 bg-green-500/20 text-green-400 rounded-full flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 bg-green-400 rounded-full"></span>
+                  <span className="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse"></span>
                   {faceCount} 人脸
                 </span>
               )}
-              {poseDetected && (
+              {motion > 20 && (
                 <span className="text-xs px-2 py-1 bg-red-500/20 text-red-400 rounded-full flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 bg-red-400 rounded-full"></span>
-                  姿态 {confidence}%
+                  <span className="w-1.5 h-1.5 bg-red-400 rounded-full animate-pulse"></span>
+                  运动 {motion}%
                 </span>
               )}
               <span className="text-xs px-2 py-1 bg-red-500/20 text-red-400 rounded-full">REC</span>
@@ -375,21 +429,13 @@ export default function Home() {
                 </div>
                 <h2 className="text-xl font-semibold text-white mb-2">准备就绪</h2>
                 <p className="text-zinc-400 mb-2">点击下方按钮启动摄像头监控</p>
-                {isModelLoading && (
-                  <p className="text-yellow-400 text-sm mb-4 flex items-center gap-2">
-                    <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                    </svg>
-                    正在加载 AI 模型...
-                  </p>
-                )}
+                <p className="text-zinc-500 text-sm mb-6">支持人脸检测、运动捕捉、截图保存</p>
                 <button
                   onClick={startCamera}
-                  disabled={isLoading || isModelLoading}
+                  disabled={isLoading}
                   className="px-8 py-3 bg-green-600 hover:bg-green-700 disabled:bg-zinc-700 text-white font-semibold rounded-xl transition-colors"
                 >
-                  {isLoading ? "启动中..." : isModelLoading ? "模型加载中..." : "启动监控"}
+                  {isLoading ? "启动中..." : "启动监控"}
                 </button>
               </div>
             ) : (
@@ -408,15 +454,15 @@ export default function Home() {
                 {/* Detection overlay */}
                 <div className="absolute top-3 left-3 flex flex-col gap-2">
                   {faceCount > 0 && (
-                    <div className="bg-green-500/80 text-white text-xs px-2 py-1 rounded flex items-center gap-1">
+                    <div className="bg-green-500/90 text-white text-xs px-2 py-1 rounded flex items-center gap-1 shadow-lg">
                       <span className="w-1.5 h-1.5 bg-white rounded-full animate-pulse"></span>
-                      {faceCount} 人脸检测中
+                      {faceCount} 人脸检测
                     </div>
                   )}
-                  {poseDetected && (
-                    <div className="bg-red-500/80 text-white text-xs px-2 py-1 rounded flex items-center gap-1">
+                  {motion > 20 && (
+                    <div className="bg-red-500/90 text-white text-xs px-2 py-1 rounded flex items-center gap-1 shadow-lg">
                       <span className="w-1.5 h-1.5 bg-white rounded-full animate-pulse"></span>
-                      姿态识别 {confidence}%
+                      运动 {motion}%
                     </div>
                   )}
                 </div>
@@ -429,7 +475,9 @@ export default function Home() {
               <div className="bg-zinc-900 rounded-2xl border border-zinc-800 p-4">
                 <div className="grid grid-cols-4 gap-4 text-center">
                   <div>
-                    <div className="text-2xl font-bold text-white">{Math.floor(duration / 60)}:{(duration % 60).toString().padStart(2, '0')}</div>
+                    <div className="text-2xl font-bold text-white">
+                      {Math.floor(duration / 60)}:{(duration % 60).toString().padStart(2, "0")}
+                    </div>
                     <div className="text-xs text-zinc-500">运行时长</div>
                   </div>
                   <div>
@@ -437,12 +485,12 @@ export default function Home() {
                     <div className="text-xs text-zinc-500">检测人脸</div>
                   </div>
                   <div>
-                    <div className="text-2xl font-bold text-red-400">{poseDetected ? confidence + "%" : "--"}</div>
-                    <div className="text-xs text-zinc-500">姿态置信度</div>
+                    <div className={`text-2xl font-bold ${motion > 20 ? "text-red-400" : "text-zinc-400"}`}>{motion}%</div>
+                    <div className="text-xs text-zinc-500">运动强度</div>
                   </div>
                   <div>
-                    <div className="text-2xl font-bold text-blue-400">REC</div>
-                    <div className="text-xs text-zinc-500">状态</div>
+                    <div className="text-2xl font-bold text-purple-400">{snapshots}</div>
+                    <div className="text-xs text-zinc-500">截图数</div>
                   </div>
                 </div>
               </div>
@@ -475,13 +523,13 @@ export default function Home() {
           <footer className="bg-zinc-900 border-t border-zinc-800 p-4">
             <div className="max-w-7xl mx-auto">
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
-                <div className={`p-3 bg-zinc-800/50 rounded-xl transition-all ${faceCount > 0 ? 'ring-2 ring-green-500/50' : ''}`}>
+                <div className={`p-3 bg-zinc-800/50 rounded-xl transition-all ${faceCount > 0 ? "ring-2 ring-green-500/50" : ""}`}>
                   <div className="text-green-400 font-semibold">人脸检测</div>
-                  <div className="text-xs text-zinc-500 mt-1">实时识别</div>
+                  <div className="text-xs text-zinc-500 mt-1">智能聚类</div>
                 </div>
-                <div className={`p-3 bg-zinc-800/50 rounded-xl transition-all ${poseDetected ? 'ring-2 ring-red-500/50' : ''}`}>
-                  <div className="text-blue-400 font-semibold">姿态识别</div>
-                  <div className="text-xs text-zinc-500 mt-1">动作捕捉</div>
+                <div className={`p-3 bg-zinc-800/50 rounded-xl transition-all ${motion > 20 ? "ring-2 ring-red-500/50" : ""}`}>
+                  <div className="text-blue-400 font-semibold">运动检测</div>
+                  <div className="text-xs text-zinc-500 mt-1">帧差分析</div>
                 </div>
                 <div className="p-3 bg-zinc-800/50 rounded-xl">
                   <div className="text-purple-400 font-semibold">截图保存</div>
