@@ -3,11 +3,13 @@ import { createClient } from '@supabase/supabase-js';
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || '';
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || '';
 
-if (!supabaseUrl || !supabaseAnonKey) {
-  console.warn('Supabase URL or Anon Key is missing. Some features may not work.');
-}
+// 检查是否配置了 Supabase
+const hasSupabase = !!(supabaseUrl && supabaseAnonKey);
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+// 创建 Supabase 客户端（仅在配置时）
+export const supabase = hasSupabase
+  ? createClient(supabaseUrl, supabaseAnonKey)
+  : null;
 
 // 数据库类型定义
 export interface DetectionLog {
@@ -39,6 +41,11 @@ export async function uploadScreenshot(
   file: File | Blob,
   fileName: string
 ): Promise<string | null> {
+  if (!supabase) {
+    console.warn('Supabase 未配置，跳过上传');
+    return null;
+  }
+
   try {
     const { data, error } = await supabase.storage
       .from(STORAGE_BUCKETS.SCREENSHOTS)
@@ -59,6 +66,11 @@ export async function uploadScreenshot(
 
 // 辅助函数：保存检测记录
 export async function saveDetectionLog(log: Omit<DetectionLog, 'id' | 'created_at'>) {
+  if (!supabase) {
+    console.warn('Supabase 未配置，跳过保存');
+    return null;
+  }
+
   try {
     const { data, error } = await supabase
       .from('detection_logs')
@@ -76,6 +88,11 @@ export async function saveDetectionLog(log: Omit<DetectionLog, 'id' | 'created_a
 
 // 辅助函数：获取检测历史
 export async function getDetectionLogs(limit = 50) {
+  if (!supabase) {
+    console.warn('Supabase 未配置，返回空数组');
+    return [];
+  }
+
   try {
     const { data, error } = await supabase
       .from('detection_logs')
