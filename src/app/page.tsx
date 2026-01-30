@@ -26,8 +26,8 @@ export default function Home() {
   const [snapshots, setSnapshots] = useState<number>(0);
   const [detectionLogs, setDetectionLogs] = useState<DetectionLog[]>([]);
   const [lastDetection, setLastDetection] = useState<string>("--");
-  const [debugMode, setDebugMode] = useState(false);
   const [skinPixels, setSkinPixels] = useState<number>(0);
+  const [avgBrightness, setAvgBrightness] = useState<number>(0);
 
   const streamRef = useRef<MediaStream | null>(null);
   const durationRef = useRef<NodeJS.Timeout | null>(null);
@@ -49,31 +49,75 @@ export default function Home() {
     });
   };
 
-  // Enhanced skin detection with more ranges
+  // Very relaxed skin detection - accepts wider color range
   const isSkinPixel = (r: number, g: number, b: number): boolean => {
-    // Very relaxed skin detection for better detection
-    // Light skin
-    if (r > 220 && g > 180 && b > 140 && r > g && r > b) return true;
-    // Medium-light skin
-    if (r > 180 && g > 130 && b > 90 && r > g * 1.1 && r - g > 20) return true;
-    // Medium skin
-    if (r > 140 && g > 90 && b > 70 && r > g * 1.15 && r - g > 25) return true;
-    // Medium-dark skin
-    if (r > 110 && g > 70 && b > 55 && r > g * 1.1 && r - g > 20) return true;
-    // Dark skin
-    if (r > 80 && g > 55 && b > 45 && r > g * 1.08 && r - g > 15) return true;
+    // Skip very dark or very bright pixels
+    const brightness = (r + g + b) / 3;
+    if (brightness < 40 || brightness > 240) return false;
+
+    // Very relaxed skin detection - just need r > g and r > b with some margin
+    // This will catch most skin tones and some false positives (better than missing faces)
+    if (r > g && r > b && r - g > 5) {
+      // Additional relaxed checks
+      const rgDiff = r - g;
+      const rbDiff = r - b;
+      const gbDiff = g - b;
+
+      // Accept if red is clearly dominant and green is close to blue
+      if (rgDiff > 5 && gbDiff < 50) return true;
+
+      // Alternative: check for typical skin ratios (very relaxed)
+      if (g > b * 0.7 && r < g * 2.5) return true;
+
+      // Very permissive: just need some red dominance
+      if (rgDiff > 3 && r > 60) return true;
+    }
+
+    // Also try detecting by hue - skin is typically in a specific hue range
+    // Convert RGB to HSL
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const delta = max - min;
+
+    if (delta === 0) return false;
+
+    let h = 0;
+    if (max === r) {
+      h = ((g - b) / delta) % 6;
+    } else if (max === g) {
+      h = (b - r) / delta + 2;
+    } else {
+      h = (r - g) / delta + 4;
+    }
+    h = Math.round(h * 60);
+    if (h < 0) h += 360;
+
+    const s = max === 0 ? 0 : delta / max;
+    const l = max / 255;
+
+    // Skin hue range (very wide): 0-50 degrees (red to yellow-ish)
+    // And allow moderate saturation and brightness
+    if ((h >= 0 && h <= 50) || (h >= 340 && h <= 360)) {
+      if (s > 0.1 && s < 0.8 && l > 0.25 && l < 0.9) {
+        return true;
+      }
+    }
 
     return false;
   };
 
-  // Enhanced face detection
+  // Enhanced face detection with better clustering
   const detectFaces = (ctx: CanvasRenderingContext2D, width: number, height: number): Face[] => {
     const imageData = ctx.getImageData(0, 0, width, height);
     const data = imageData.data;
     const detectedPixels: { x: number; y: number }[] = [];
 
-    // Higher sampling rate for better detection
-    const step = 5;
+    // Calculate average brightness
+    let totalBrightness = 0;
+    let pixelCount = 0;
+
+    // Sample every 4th pixel for better coverage
+    const step = 4;
     for (let y = 0; y < height; y += step) {
       for (let x = 0; x < width; x += step) {
         const i = (y * width + x) * 4;
@@ -81,17 +125,27 @@ export default function Home() {
         const g = data[i + 1];
         const b = data[i + 2];
 
+        totalBrightness += (r + g + b) / 3;
+        pixelCount++;
+
         if (isSkinPixel(r, g, b)) {
           detectedPixels.push({ x, y });
         }
       }
     }
 
+    setAvgBrightness(Math.round(totalBrightness / pixelCount));
     setSkinPixels(detectedPixels.length);
 
-    // Cluster pixels into faces
+    // If very few skin pixels, the detection might not be working
+    if (detectedPixels.length < 10) {
+      return [];
+    }
+
+    // Use density-based clustering
     const faces: Face[] = [];
     const visited = new Set<string>();
+    const minClusterSize = 15;
 
     detectedPixels.forEach((pixel) => {
       const key = `${pixel.x},${pixel.y}`;
@@ -99,30 +153,33 @@ export default function Home() {
 
       const cluster: { x: number; y: number }[] = [];
       const queue = [pixel];
-      const clusterRadius = 120;
 
       while (queue.length > 0) {
         const p = queue.shift()!;
         const pKey = `${p.x},${p.y}`;
         if (visited.has(pKey)) continue;
-        if (cluster.length >= 500) break;
+        if (cluster.length >= 800) break;
 
         visited.add(pKey);
         cluster.push(p);
 
-        detectedPixels.forEach((sp) => {
-          const dist = Math.sqrt((p.x - sp.x) ** 2 + (p.y - sp.y) ** 2);
-          if (dist < clusterRadius) {
-            const spKey = `${sp.x},${sp.y}`;
-            if (!visited.has(spKey)) {
-              queue.push(sp);
-            }
+        // Find nearby pixels efficiently
+        for (const sp of detectedPixels) {
+          const spKey = `${sp.x},${sp.y}`;
+          if (visited.has(spKey)) continue;
+
+          const dx = p.x - sp.x;
+          const dy = p.y - sp.y;
+          const dist = dx * dx + dy * dy;
+
+          if (dist < 10000) { // 100px radius squared
+            queue.push(sp);
           }
-        });
+        }
       }
 
-      // Lower threshold for face detection
-      if (cluster.length > 20) {
+      // Lower threshold for better detection
+      if (cluster.length > minClusterSize) {
         const minX = Math.min(...cluster.map((p) => p.x));
         const maxX = Math.max(...cluster.map((p) => p.x));
         const minY = Math.min(...cluster.map((p) => p.y));
@@ -131,21 +188,21 @@ export default function Home() {
         const w = maxX - minX;
         const h = maxY - minY;
 
-        // Relaxed aspect ratio check
-        if (w > 25 && h > 35 && h / w > 0.6 && h / w < 4) {
-          const overlaps = faces.some((f) =>
-            minX < f.x + f.width + 50 &&
-            maxX + w > f.x - 50 &&
-            minY < f.y + f.height + 50 &&
-            maxY + h > f.y - 50
-          );
+        // Very relaxed aspect ratio - faces come in many shapes
+        if (w > 20 && h > 25 && h / w > 0.4 && h / w < 5) {
+          // Check overlap with existing faces
+          const overlaps = faces.some((f) => {
+            const overlapX = Math.max(0, Math.min(minX + w, f.x + f.width) - Math.max(minX, f.x));
+            const overlapY = Math.max(0, Math.max(minY + h, f.y + f.height) - Math.max(minY, f.y));
+            return overlapX > 30 && overlapY > 30;
+          });
 
           if (!overlaps) {
             faces.push({
-              x: Math.max(0, minX - 30),
-              y: Math.max(0, minY - 40),
-              width: w + 60,
-              height: h + 80
+              x: Math.max(0, minX - 25),
+              y: Math.max(0, minY - 35),
+              width: w + 50,
+              height: h + 70
             });
           }
         }
@@ -178,24 +235,13 @@ export default function Home() {
                    Math.abs(current[i + 1] - previous[i + 1]) +
                    Math.abs(current[i + 2] - previous[i + 2]);
 
-      if (diff > 30) {
+      if (diff > 25) {
         motionPixels++;
       }
     }
 
     previousFrameRef.current = currentFrame;
-    return Math.min(100, Math.round((motionPixels / (current.length / 8)) * 400));
-  };
-
-  // Draw debug info
-  const drawDebug = (ctx: CanvasRenderingContext2D) => {
-    if (!debugMode) return;
-
-    ctx.fillStyle = "rgba(0, 255, 136, 0.1)";
-    ctx.font = "12px monospace";
-    ctx.fillText(`Skin pixels: ${skinPixels}`, 10, 70);
-    ctx.fillText(`Faces: ${faceCount}`, 10, 85);
-    ctx.fillText(`Motion: ${motionLevel}%`, 10, 100);
+    return Math.min(100, Math.round((motionPixels / (current.length / 8)) * 500));
   };
 
   // Draw face boxes
@@ -206,14 +252,14 @@ export default function Home() {
       const color = colors[index % colors.length];
 
       // Draw semi-transparent fill
-      ctx.fillStyle = `${color}20`;
+      ctx.fillStyle = `${color}30`;
       ctx.fillRect(face.x, face.y, face.width, face.height);
 
-      // Draw border
+      // Draw border brackets
       ctx.strokeStyle = color;
       ctx.lineWidth = 4;
 
-      const bracketSize = 25;
+      const bracketSize = 30;
       ctx.beginPath();
       // Top-left
       ctx.moveTo(face.x + bracketSize, face.y);
@@ -235,12 +281,12 @@ export default function Home() {
 
       // Label background
       ctx.fillStyle = color;
-      ctx.fillRect(face.x, face.y - 26, 85, 22);
+      ctx.fillRect(face.x, face.y - 28, 90, 24);
 
       // Label text
       ctx.fillStyle = "#000";
-      ctx.font = "bold 13px monospace";
-      ctx.fillText(`FACE ${index + 1}`, face.x + 6, face.y - 10);
+      ctx.font = "bold 14px monospace";
+      ctx.fillText(`FACE ${index + 1}`, face.x + 8, face.y - 11);
     });
 
     setFaceCount(faces.length);
@@ -254,7 +300,7 @@ export default function Home() {
     const width = ctx.canvas.width;
     const height = ctx.canvas.height;
 
-    // Motion bars
+    // Motion bars on right side
     for (let i = 0; i < 10; i++) {
       const isActive = motion >= (i + 1) * 10;
       ctx.fillStyle = isActive ? "#ff6b6b" : "#333";
@@ -281,13 +327,13 @@ export default function Home() {
     const faces = detectFaces(ctx, canvas.width, canvas.height);
     drawFaces(ctx, faces);
 
-    // Log periodically
+    // Log periodically (every ~30 frames)
     frameCountRef.current++;
     if (frameCountRef.current % 30 === 0) {
       if (faces.length > 0) {
-        addLog("face", `检测到 ${faces.length} 张人脸 (${skinPixels} 像素)`);
+        addLog("face", `检测到 ${faces.length} 张人脸 (${skinPixels} 肤色像素)`);
       } else {
-        addLog("info", `扫描中 (${skinPixels} 肤色像素)`);
+        addLog("info", `扫描中 - 肤色像素:${skinPixels} 亮度:${avgBrightness}`);
       }
     }
 
@@ -308,15 +354,14 @@ export default function Home() {
     ctx.fillStyle = "#888";
     ctx.fillText(new Date().toLocaleDateString(), 10, 42);
 
-    // Draw stats
+    // Draw stats overlay
     ctx.fillStyle = "#00ff88";
     ctx.font = "bold 11px monospace";
-    ctx.fillText(`FACES: ${faces.length}`, 10, canvas.height - 35);
+    ctx.fillText(`FACES: ${faces.length}`, 10, canvas.height - 50);
+    ctx.fillText(`SKIN: ${skinPixels}`, 10, canvas.height - 35);
 
     ctx.fillStyle = motion > 20 ? "#ff6b6b" : "#888";
     ctx.fillText(`MOTION: ${motion}%`, 10, canvas.height - 20);
-
-    drawDebug(ctx);
 
     animationRef.current = requestAnimationFrame(detectFrame);
   };
@@ -324,7 +369,6 @@ export default function Home() {
   const startCamera = async () => {
     try {
       setIsLoading(true);
-      // Use user facing camera for MacBook
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: "user",
@@ -343,7 +387,7 @@ export default function Home() {
       setTimeout(() => {
         detectFrame();
         addLog("info", "AI监控已启动");
-        addLog("info", "请确保面部光线充足");
+        addLog("info", "确保面对摄像头，光线充足");
       }, 300);
 
       durationRef.current = setInterval(() => {
@@ -374,6 +418,7 @@ export default function Home() {
     setFaceCount(0);
     setMotionLevel(0);
     setSkinPixels(0);
+    setAvgBrightness(0);
     previousFrameRef.current = null;
     frameCountRef.current = 0;
 
@@ -397,11 +442,22 @@ export default function Home() {
     tempCanvas.width = video.videoWidth;
     tempCanvas.height = video.videoHeight;
 
+    // Mirror the video for snapshot
+    ctx.translate(tempCanvas.width, 0);
+    ctx.scale(-1, 1);
     ctx.drawImage(video, 0, 0);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+    // Draw detection overlay (also mirrored)
+    ctx.save();
+    ctx.translate(tempCanvas.width, 0);
+    ctx.scale(-1, 1);
     if (canvasCtxRef.current) {
       ctx.drawImage(canvasRef.current, 0, 0);
     }
+    ctx.restore();
 
+    // Add timestamp
     ctx.fillStyle = "#00ff88";
     ctx.font = "bold 20px monospace";
     ctx.fillText(new Date().toLocaleString(), 10, 30);
@@ -436,12 +492,6 @@ export default function Home() {
             <p className="text-xs text-zinc-400 mt-1">实时 AI 摄像监控</p>
           </div>
           <div className="flex items-center gap-3">
-            <button
-              onClick={() => setDebugMode(!debugMode)}
-              className={`text-xs px-2 py-1 rounded ${debugMode ? "bg-yellow-500/20 text-yellow-400" : "bg-zinc-800 text-zinc-400"}`}
-            >
-              {debugMode ? "调试开" : "调试关"}
-            </button>
             <span className="text-xs text-zinc-400">{new Date().toLocaleTimeString()}</span>
             {isMonitoring && <span className="text-xs px-2 py-1 bg-red-500/20 text-red-400 rounded-full">REC</span>}
           </div>
@@ -462,10 +512,10 @@ export default function Home() {
                   </div>
                   <h2 className="text-xl font-semibold text-white mb-2">准备就绪</h2>
                   <p className="text-zinc-400 mb-4">点击下方按钮启动摄像头监控</p>
-                  <div className="text-sm text-zinc-500 mb-6">
+                  <div className="text-sm text-zinc-500 mb-6 space-y-1">
                     <p>• 使用 MacBook 前置摄像头</p>
                     <p>• 请确保面部光线充足</p>
-                    <p>• 面对摄像头，距离适中</p>
+                    <p>• 面对摄像头，距离 50-100cm</p>
                   </div>
                   <button
                     onClick={startCamera}
@@ -528,12 +578,21 @@ export default function Home() {
                   </div>
                 </div>
 
-                <div className="bg-zinc-800 rounded-xl p-3">
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-zinc-400 text-sm">肤色像素</span>
-                    <span className="text-lg font-bold text-zinc-300">{skinPixels}</span>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="bg-zinc-800 rounded-xl p-3">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-zinc-400 text-xs">肤色像素</span>
+                      <span className="text-lg font-bold text-zinc-300">{skinPixels}</span>
+                    </div>
+                    <div className="text-xs text-zinc-500">扫描区域</div>
                   </div>
-                  <div className="text-xs text-zinc-500">扫描到的可能肤色区域</div>
+                  <div className="bg-zinc-800 rounded-xl p-3">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-zinc-400 text-xs">平均亮度</span>
+                      <span className="text-lg font-bold text-zinc-300">{avgBrightness}</span>
+                    </div>
+                    <div className="text-xs text-zinc-500">画面亮度</div>
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
@@ -577,7 +636,7 @@ export default function Home() {
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
                 <div className={`p-3 bg-zinc-800/50 rounded-xl ${faceCount > 0 ? "ring-2 ring-green-500/50" : ""}`}>
                   <div className="text-green-400 font-semibold">人脸检测</div>
-                  <div className="text-xs text-zinc-500 mt-1">肤色聚类</div>
+                  <div className="text-xs text-zinc-500 mt-1">肤色+HSL分析</div>
                 </div>
                 <div className={`p-3 bg-zinc-800/50 rounded-xl ${motionLevel > 20 ? "ring-2 ring-red-500/50" : ""}`}>
                   <div className="text-blue-400 font-semibold">运动检测</div>
