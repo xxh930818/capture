@@ -405,10 +405,10 @@ export default function Home() {
                   {faceCount} 人脸
                 </span>
               )}
-              {motion > 20 && (
+              {motionLevel > 20 && (
                 <span className="text-xs px-2 py-1 bg-red-500/20 text-red-400 rounded-full flex items-center gap-1">
                   <span className="w-1.5 h-1.5 bg-red-400 rounded-full animate-pulse"></span>
-                  运动 {motion}%
+                  运动 {motionLevel}%
                 </span>
               )}
               <span className="text-xs px-2 py-1 bg-red-500/20 text-red-400 rounded-full">REC</span>
@@ -459,10 +459,10 @@ export default function Home() {
                       {faceCount} 人脸检测
                     </div>
                   )}
-                  {motion > 20 && (
+                  {motionLevel > 20 && (
                     <div className="bg-red-500/90 text-white text-xs px-2 py-1 rounded flex items-center gap-1 shadow-lg">
                       <span className="w-1.5 h-1.5 bg-white rounded-full animate-pulse"></span>
-                      运动 {motion}%
+                      运动 {motionLevel}%
                     </div>
                   )}
                 </div>
@@ -485,7 +485,7 @@ export default function Home() {
                     <div className="text-xs text-zinc-500">检测人脸</div>
                   </div>
                   <div>
-                    <div className={`text-2xl font-bold ${motion > 20 ? "text-red-400" : "text-zinc-400"}`}>{motion}%</div>
+                    <div className={`text-2xl font-bold ${motionLevel > 20 ? "text-red-400" : "text-zinc-400"}`}>{motionLevel}%</div>
                     <div className="text-xs text-zinc-500">运动强度</div>
                   </div>
                   <div>
@@ -527,7 +527,7 @@ export default function Home() {
                   <div className="text-green-400 font-semibold">人脸检测</div>
                   <div className="text-xs text-zinc-500 mt-1">智能聚类</div>
                 </div>
-                <div className={`p-3 bg-zinc-800/50 rounded-xl transition-all ${motion > 20 ? "ring-2 ring-red-500/50" : ""}`}>
+                <div className={`p-3 bg-zinc-800/50 rounded-xl transition-all ${motionLevel > 20 ? "ring-2 ring-red-500/50" : ""}`}>
                   <div className="text-blue-400 font-semibold">运动检测</div>
                   <div className="text-xs text-zinc-500 mt-1">帧差分析</div>
                 </div>
