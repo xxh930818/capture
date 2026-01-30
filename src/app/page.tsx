@@ -434,7 +434,7 @@ export default function Home() {
                     <div className="text-xs text-zinc-500">检测人脸</div>
                   </div>
                   <div>
-                    <div className="text-2xl font-bold text-red-400">{poseDetected ? confidence + "%"": "--"}</div>
+                    <div className="text-2xl font-bold text-red-400">{poseDetected ? confidence + "%" : "--"}</div>
                     <div className="text-xs text-zinc-500">姿态置信度</div>
                   </div>
                   <div>
